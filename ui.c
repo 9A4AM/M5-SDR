@@ -129,7 +129,7 @@ static void cpu_temp_sample(void)
 /* Startup splash: full-screen welcome banner shown for a few seconds after
  * boot. Edit the callsign/text to your own. */
 #define SPLASH_TITLE "M5-SDR"
-#define SPLASH_CALL  "9A4AM"
+#define SPLASH_CALL  "9A3ZI -> mod 9A4AM"
 #define SPLASH_MS    2500
 
 static uint16_t *LBUF;
