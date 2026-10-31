@@ -11,6 +11,7 @@ void station_settings_get(station_settings_t *out)
     snprintf(out->password, sizeof out->password, "%s", NET_WIFI_PASSWORD);
     snprintf(out->callsign, sizeof out->callsign, "%s", PSK_CALLSIGN);
     snprintf(out->grid, sizeof out->grid, "%s", PSK_GRID);
+    out->ppm = SDR_PPM_DEFAULT;
     nvs_handle_t h;
     if (nvs_open("station", NVS_READONLY, &h) != ESP_OK) return;
     size_t n;
@@ -18,6 +19,8 @@ void station_settings_get(station_settings_t *out)
     n=sizeof out->password; nvs_get_str(h,"pass",out->password,&n);
     n=sizeof out->callsign; nvs_get_str(h,"call",out->callsign,&n);
     n=sizeof out->grid; nvs_get_str(h,"grid",out->grid,&n);
+    int16_t p;
+    if (nvs_get_i16(h,"ppm",&p) == ESP_OK && p >= ST_PPM_MIN && p <= ST_PPM_MAX) out->ppm = p;
     nvs_close(h);
 }
 bool station_settings_save(const station_settings_t *in)
@@ -29,6 +32,7 @@ bool station_settings_save(const station_settings_t *in)
     if (e == ESP_OK) e = nvs_set_str(h,"pass",in->password);
     if (e == ESP_OK) e = nvs_set_str(h,"call",in->callsign);
     if (e == ESP_OK) e = nvs_set_str(h,"grid",in->grid);
+    if (e == ESP_OK) e = nvs_set_i16(h,"ppm",(int16_t)in->ppm);
     if (e == ESP_OK) e = nvs_commit(h);
     nvs_close(h);
     return e == ESP_OK;

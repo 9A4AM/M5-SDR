@@ -20,6 +20,7 @@
  *   USB/LSB: DC block → Weaver: mix by ∓1.5 kHz → 255-tap FIR low-pass on I/Q
  *            → mix back, take real part (opposite sideband is rejected) → AGC.
  *   CW     : same Weaver, pitch 700 Hz, 6th-order Butterworth (~600 Hz wide).
+ *   M20    : 96 kHz IF (/4 then /3), 9 kHz IIR low-pass → discriminator → m20_feed().
  *   RS41   : 8 kHz IIR low-pass → FM discriminator at 48 kHz → rs41_feed().
  *            (audio = the data buzz, so you can hear when a sonde is there)
  * The dial frequency (tuner centre) is the suppressed carrier for SSB.
@@ -37,6 +38,7 @@
 #include "sdr.h"
 #include "audio.h"
 #include "rs41.h"
+#include "m20.h"
 #include "ft8.h"
 #include "wspr.h"
 #include "horus.h"
@@ -131,6 +133,15 @@ static float s_fm_pa, s_fm_pb, s_rs_dc; /* RS41: previous IQ sample, audio DC tr
 #endif
 #define RS41_AUDIO_GAIN 18000.0f
 
+/* M20: 9600 symbols/s needs a 96 kHz IF (10 samples/symbol). The discriminator
+ * output is in rad/sample, i.e. half as large as at 48 kHz for the same
+ * deviation, hence the larger audio gain. Audio is decimated 2:1 back to 48 kHz. */
+#define M20_IF_RATE    96000.0f
+#define M20_CUT_HZ     9000.0f
+#define M20_IF_SEC     2
+#define M20_AUDIO_GAIN 30000.0f
+static int s_m20_ph;
+static float s_m20_hold;
 /* front-end decimator state */
 static float b_accI, b_accQ;
 static int b_cnt4;
@@ -549,7 +560,8 @@ static void demod_bb(void)
         nif++;
 
         float out = 0;
-        if (mode == DSP_MODE_RS41 || mode == DSP_MODE_HORUS || mode == DSP_MODE_APRS) {
+        bool emit = true; /* M20 runs at 96 kHz: only every second sample is an audio sample */
+        if (mode == DSP_MODE_RS41 || mode == DSP_MODE_HORUS || mode == DSP_MODE_APRS || mode == DSP_MODE_M20) {
             /* Horus: remove RTL2832 centre-frequency DC spur before 4FSK modem.
              * Do not alter RS41 path or the waterfall. */
             if (mode == DSP_MODE_HORUS) {
@@ -565,10 +577,18 @@ static void demod_bb(void)
             s_fm_pb = b;
             float d = atan2f(dim, dre); /* rad/sample: ±2.4 kHz dev = ±0.31 */
             if (mode == DSP_MODE_RS41) rs41_feed(d);
+            else if (mode == DSP_MODE_M20) m20_feed(d);
             else if (mode == DSP_MODE_APRS) aprs_feed(d);
             else { horus_feed(d); horus_decoder_feed_iq(a,b); }
             s_rs_dc += 0.001f * (d - s_rs_dc);
-            out = (d - s_rs_dc) * RS41_AUDIO_GAIN;
+            if (mode == DSP_MODE_M20) {
+                float o = (d - s_rs_dc) * M20_AUDIO_GAIN;
+                s_m20_ph ^= 1;
+                if (s_m20_ph) { s_m20_hold = o; emit = false; }
+                else out = 0.5f * (o + s_m20_hold); /* 96 kHz -> 48 kHz */
+            } else {
+                out = (d - s_rs_dc) * RS41_AUDIO_GAIN;
+            }
         } else if (mode == DSP_MODE_AM) {
             float a = bq_run(0, zI), b = bq_run(1, zQ);
             float mag = sqrtf(a * a + b * b);
@@ -621,7 +641,7 @@ static void demod_bb(void)
                 out = out < 0 ? -ao : ao;
             }
         }
-        aud[naud++] = open ? clip16(out) : 0;
+        if (emit) aud[naud++] = open ? clip16(out) : 0;
     }
     /* renormalise the oscillator once per block so it never drifts */
     {
@@ -673,6 +693,7 @@ static void apply_mode(int m)
     s_agc_env = 0; s_am_dc = 0;
     s_fm_pa = s_fm_pb = s_rs_dc = 0;
     s_osc_c = 1; s_osc_s = 0;
+    s_m20_ph = 0; s_m20_hold = 0;
 
     switch (m) {
     case DSP_MODE_NFM:
@@ -699,6 +720,17 @@ static void apply_mode(int m)
         design_butter_lp(RS41_IF_SEC, RS41_CUT_HZ, BB_RATE);
         s_bb_sgn = 1; s_bb_w0 = 0;
         rs41_reset();
+        break;
+    case DSP_MODE_M20:
+        /* 96 kHz IF: 1.152 MS/s -> /4 boxcar -> 288 kHz -> /3 triangular -> 96 kHz;
+         * 288 kS/s -> /1 -> /3 triangular -> 96 kHz. */
+        s_bb_d1 = (s_rate == RATE_HI) ? 4 : 1;
+        s_bb_d2 = 3;
+        s_bb_triC = W3C; s_bb_triN = W3N;
+        s_bb_inv1 = 1.0f / s_bb_d1;
+        design_butter_lp(M20_IF_SEC, M20_CUT_HZ, M20_IF_RATE);
+        s_bb_sgn = 1; s_bb_w0 = 0;
+        m20_reset();
         break;
     case DSP_MODE_USB:
     case DSP_MODE_LSB:
@@ -811,6 +843,6 @@ int dsp_get_mode(void) { return s_mode_pub; }
 
 const char *dsp_mode_name(int mode)
 {
-    static const char *const N[DSP_MODE_COUNT] = {"WFM", "NFM", "AM", "USB", "LSB", "CW", "RS41", "FT8", "WSPR", "HORUS", "APRS"};
+    static const char *const N[DSP_MODE_COUNT] = {"WFM", "NFM", "AM", "USB", "LSB", "CW", "RS41", "FT8", "WSPR", "HORUS", "APRS", "M20"};
     return (mode >= 0 && mode < DSP_MODE_COUNT) ? N[mode] : "?";
 }

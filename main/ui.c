@@ -31,6 +31,7 @@
 #include "nvs_flash.h"
 #include "station_settings.h"
 #include "wifi_net.h"
+#include "net_cfg.h"
 #include "driver/ppa.h"
 #include "driver/temperature_sensor.h"
 
@@ -38,6 +39,7 @@
 #include "sdr.h"
 #include "dsp.h"
 #include "rs41.h"
+#include "m20.h"
 #include "ft8.h"
 #include "wspr.h"
 #include "audio.h"
@@ -125,7 +127,7 @@ static void cpu_temp_sample(void)
 /* Startup splash: full-screen welcome banner shown for a few seconds after
  * boot. Edit the callsign/text to your own. */
 #define SPLASH_TITLE "M5-SDR"
-#define SPLASH_CALL  "9A3ZI"
+#define SPLASH_CALL  "9A4AM"
 #define SPLASH_MS    2500
 
 static uint16_t *LBUF;
@@ -135,16 +137,16 @@ static int s_fb_index;
 static uint32_t s_center;
 static uint32_t s_view_span; /* 0 means full DSP spectrum width */
 static int s_volume = AUDIO_VOL_DEFAULT;
-static int s_squelch = -60;
+static int s_squelch = -55;
 static int s_mode = DSP_MODE_WFM;
 static const char *s_label = "WFM broadcast";
 static int s_bm_hf = 0, s_bm_vhf = 0, s_bm_uhf = 0; /* per-band preset cursor */
 static uint32_t s_rate_cur = 1152000; /* RTL2832 sample rate currently selected */
 
 /* Tuning step (Hz) applied by the [-]/[+] buttons; STEP button cycles it. */
-static const uint32_t STEPS[] = {100, 500, 1000, 5000, 25000, 100000, 1000000};
+static const uint32_t STEPS[] = {100, 500, 1000, 5000, 6250, 12500, 25000};
 #define N_STEPS ((int)(sizeof(STEPS) / sizeof(STEPS[0])))
-static int s_step_i = 6; /* default 25 kHz */
+static int s_step_i = 5; /* default 12.5 kHz */
 
 /* Tuner gain steps in 0.1 dB; -1 = automatic. Manual gain avoids the tuner AGC
  * turning the gain down because of strong signals elsewhere on the band, which
@@ -245,6 +247,23 @@ static const uint8_t *glyph(char c)
     };
     static const uint8_t underscore[7] = {0,0,0,0,0,0,0x1F};
     static const uint8_t at_sign[7] = {0x0E,0x11,0x17,0x15,0x17,0x10,0x0E};
+    /* punctuation for the touch keyboard (5x7, same bit layout as above) */
+    static const struct { char c; uint8_t g[7]; } SYM[] = {
+        {'!', {0x04,0x04,0x04,0x04,0x04,0x00,0x04}}, {'"', {0x0A,0x0A,0x0A,0x00,0x00,0x00,0x00}},
+        {'#', {0x0A,0x0A,0x1F,0x0A,0x1F,0x0A,0x0A}}, {'$', {0x04,0x0F,0x14,0x0E,0x05,0x1E,0x04}},
+        {'%', {0x18,0x19,0x02,0x04,0x08,0x13,0x03}}, {'&', {0x0C,0x12,0x14,0x08,0x15,0x12,0x0D}},
+        {'\'', {0x04,0x04,0x08,0x00,0x00,0x00,0x00}}, {'(', {0x02,0x04,0x08,0x08,0x08,0x04,0x02}},
+        {')', {0x08,0x04,0x02,0x02,0x02,0x04,0x08}}, {'*', {0x00,0x04,0x15,0x0E,0x15,0x04,0x00}},
+        {',', {0x00,0x00,0x00,0x00,0x0C,0x04,0x08}}, {';', {0x00,0x0C,0x0C,0x00,0x0C,0x04,0x08}},
+        {'=', {0x00,0x00,0x1F,0x00,0x1F,0x00,0x00}}, {'?', {0x0E,0x11,0x01,0x02,0x04,0x00,0x04}},
+        {'[', {0x0E,0x08,0x08,0x08,0x08,0x08,0x0E}}, {'\\', {0x10,0x10,0x08,0x04,0x02,0x01,0x01}},
+        {']', {0x0E,0x02,0x02,0x02,0x02,0x02,0x0E}}, {'^', {0x04,0x0A,0x11,0x00,0x00,0x00,0x00}},
+        {'`', {0x08,0x04,0x02,0x00,0x00,0x00,0x00}}, {'{', {0x02,0x04,0x04,0x08,0x04,0x04,0x02}},
+        {'|', {0x04,0x04,0x04,0x04,0x04,0x04,0x04}}, {'}', {0x08,0x04,0x04,0x02,0x04,0x04,0x08}},
+        {'~', {0x00,0x00,0x08,0x15,0x02,0x00,0x00}},
+    };
+    for (size_t i = 0; i < sizeof SYM / sizeof SYM[0]; i++)
+        if (SYM[i].c == c) return SYM[i].g;
     if (c >= 'a' && c <= 'z') return lowercase[c - 'a'];
     if (c == '_') return underscore;
     if (c == '@') return at_sign;
@@ -322,6 +341,7 @@ static uint16_t mode_color(int m)
     case DSP_MODE_LSB: return RGB565(255, 120, 200);
     case DSP_MODE_CW:  return RGB565(200, 160, 255);
     case DSP_MODE_RS41: return RGB565(255, 90, 90);
+    case DSP_MODE_M20:  return RGB565(255, 140, 60);
     case DSP_MODE_FT8:  return RGB565(60, 220, 200);
     case DSP_MODE_WSPR: return RGB565(240, 170, 80);
     case DSP_MODE_HORUS: return RGB565(140, 220, 120);
@@ -480,6 +500,52 @@ static void draw_rs41_panel(void)
     text(x, y, 2, RGB565(150, 150, 150), b);
 }
 
+/* M20 mode: same telemetry panel as RS41 (the M20 has no RS/CRC-block diagnostics,
+ * so the last line shows frame counters and the header eye opening instead). */
+static void draw_m20_panel(void)
+{
+    static uint32_t last_seq;
+    static TickType_t last_tick;
+    m20_info_t in;
+    bool have = m20_get_info(&in);
+    s_panel_mode = -1; /* this panel overwrites the shared area */
+    rect(0, WF_Y0, LW, WF_H, RGB565(0, 0, 0));
+
+    rect(540, WF_Y0 + 3, 92, 23, RGB565(30, 90, 110));
+    text(555, WF_Y0 + 8, 2, COL_TEXT, "LOG");
+    const int x = 8, pitch = 18;
+    int y = WF_Y0 + 4;
+    char b[128];
+    if (!have) {
+        text(x, y, 2, RGB565(230, 230, 230), "WAITING FOR M20");
+        text(x, y + pitch, 2, RGB565(150, 150, 150), "TUNE 400-406 MHZ");
+        text(x, y + 2 * pitch, 2, RGB565(150, 150, 150), "PRESS M20 AGAIN TO CENTRE ON THE PEAK");
+        return;
+    }
+    if (in.seq != last_seq) { last_seq = in.seq; last_tick = xTaskGetTickCount(); }
+    bool stale = (xTaskGetTickCount() - last_tick) > pdMS_TO_TICKS(4000);
+    uint16_t cv = stale ? RGB565(120, 120, 120) : RGB565(230, 230, 230);
+    uint16_t ci = stale ? RGB565(120, 120, 120) : RGB565(255, 220, 0);
+
+    snprintf(b, sizeof b, "ID %s  FRM %u", in.have_id ? in.id : "-", (unsigned)in.frame_no);
+    text(x, y, 2, ci, b);
+    y += pitch;
+    if (in.have_pos) snprintf(b, sizeof b, "LAT %.5f  LON %.5f", in.lat, in.lon);
+    else snprintf(b, sizeof b, "LAT -  LON -");
+    text(x, y, 2, cv, b);
+    y += pitch;
+    if (in.have_pos) snprintf(b, sizeof b, "ALT %.0f M  VH %.1f  VV %.1f  HDG %.0f", in.alt, in.vh, in.vv, in.vd);
+    else snprintf(b, sizeof b, "ALT -");
+    text(x, y, 2, cv, b);
+    y += pitch;
+    if (in.have_time) snprintf(b, sizeof b, "UTC %02d:%02d:%02d  WEEK %u", in.hh, in.mm, in.ss, (unsigned)in.week);
+    else snprintf(b, sizeof b, "UTC -");
+    text(x, y, 2, cv, b);
+    y += pitch;
+    snprintf(b, sizeof b, "OK %u  BAD %u  EYE %.2f", (unsigned)in.frames_ok, (unsigned)in.frames_bad, in.eye);
+    text(x, y, 2, RGB565(150, 150, 150), b);
+}
+
 /* FT8 / WSPR: the waterfall area shows the decoded messages, newest first, in three
  * columns of eight lines (24 messages = everything the decoders keep). Each line:
  * audio frequency, SNR, text (cut to fit the column). The header strip is redrawn
@@ -491,7 +557,8 @@ static void draw_rs41_panel(void)
 #define PANEL_TEXT_CH 26                /* characters left for the text after "1523 -12 " */
 #define PANEL_HDR_H   11
 
-static inline bool is_panel_mode(int m) { return m == DSP_MODE_RS41 || m == DSP_MODE_FT8 || m == DSP_MODE_WSPR; }
+static inline bool is_panel_mode(int m) { return m == DSP_MODE_RS41 || m == DSP_MODE_M20 || m == DSP_MODE_FT8 || m == DSP_MODE_WSPR; }
+static inline bool is_sonde_mode(int m) { return m == DSP_MODE_RS41 || m == DSP_MODE_M20; }
 
 /* Prepare the panel: clears what is needed. Returns true if the body must be (re)drawn. */
 static bool panel_begin(int mode, uint32_t total)
@@ -672,6 +739,7 @@ static void draw_spectrum(const float *spec, int bins)
     }
     for (int y = SPEC_Y0; y < (rs ? SPEC_Y0 + SPEC_H : WF_Y0 + WF_H); y++) LBUF[(size_t)y * LW + cx] = COL_LINE;
     if (s_mode == DSP_MODE_RS41) draw_rs41_panel();
+    else if (s_mode == DSP_MODE_M20) draw_m20_panel();
     else if (s_mode == DSP_MODE_FT8) draw_ft8_panel();
     else if (s_mode == DSP_MODE_WSPR) draw_wspr_panel();
     if (lora_aprs_enabled() || s_mode == DSP_MODE_HORUS) {
@@ -742,11 +810,12 @@ static void draw_spectrum(const float *spec, int bins)
 
 typedef struct { int x, y, w, h; } box_t;
 static const box_t B_TDN  = {  6, 220, 52, 44};  /* tune down one step */
-static const box_t B_STEP = { 62, 220, 84, 44};  /* cycle step size    */
-static const box_t B_TUP  = {150, 220, 52, 44};  /* tune up one step   */
-static const box_t B_RS41 = {210, 220, 88, 44};  /* RS41 mode; pressed again in RS41 mode = centre on the strongest peak */
-static const box_t B_GAIN = {306, 220, 44, 44};  /* tuner gain: AGC / manual steps */
-static const box_t B_PLAN = {358, 220, 88, 44};  /* band-plan menu: time-scheduled FT8/WSPR band hopping */
+static const box_t B_STEP = { 62, 220, 64, 44};  /* cycle step size    */
+static const box_t B_TUP  = {130, 220, 52, 44};  /* tune up one step   */
+static const box_t B_RS41 = {186, 220, 64, 44};  /* RS41 mode; pressed again in RS41 mode = centre on the strongest peak */
+static const box_t B_M20  = {254, 220, 56, 44};  /* M20 mode; pressed again in M20 mode = centre on the strongest peak */
+static const box_t B_GAIN = {314, 220, 44, 44};  /* tuner gain: AGC / manual steps */
+static const box_t B_PLAN = {362, 220, 88, 44};  /* band-plan menu: time-scheduled FT8/WSPR band hopping */
 static const box_t B_HF   = {  6, 272, 64, 44};
 static const box_t B_VHF  = { 74, 272, 64, 44};
 static const box_t B_UHF  = {142, 272, 64, 44};
@@ -783,6 +852,7 @@ static void draw_controls(void)
     draw_box(&B_STEP, sl, 2, RGB565(70, 70, 110));
     draw_box(&B_TUP, "+", 3, COL_BTN);
     draw_box(&B_RS41, "RS41", 2, (s_mode == DSP_MODE_RS41) ? mode_color(DSP_MODE_RS41) : COL_BTN);
+    draw_box(&B_M20, "M20", 2, (s_mode == DSP_MODE_M20) ? mode_color(DSP_MODE_M20) : COL_BTN);
     {
         char gl[16];
         if (GAINS[s_gain_i] < 0) snprintf(gl, sizeof gl, "AGC");
@@ -1075,6 +1145,11 @@ static void mode_button(int m)
         s_step_i = 2; /* 1 kHz */
         /* sondes live at 400-406 MHz; jump there if we're elsewhere */
         if (s_center < 400000000u || s_center > 406000000u) retune(403000000);
+    } else if (m == DSP_MODE_M20) {
+        s_view_span = 0; /* Reset zoom on M20 selection. */
+        set_rate(1152000); /* full 1.15 MHz view to find the sonde; dsp.c runs a 96 kHz IF for M20 */
+        s_step_i = 2; /* 1 kHz */
+        if (s_center < 400000000u || s_center > 406000000u) retune(403000000);
     } else if (m == DSP_MODE_APRS) {
         s_view_span = 0; /* Reset zoom on APRS selection. */
         set_rate(288000);
@@ -1219,6 +1294,27 @@ static void scr_off_load(void)
     }
 }
 
+/* ---- SDR frequency correction (ppm), stored with the station settings ---- */
+static int s_ppm = SDR_PPM_DEFAULT;        /* currently applied */
+static int s_ppm_saved = SDR_PPM_DEFAULT;  /* value stored in NVS */
+
+static void ppm_load(void)
+{
+    station_settings_t st;
+    station_settings_get(&st);
+    s_ppm = s_ppm_saved = st.ppm;
+}
+
+static void ppm_adjust(int delta)
+{
+    int v = s_ppm + delta;
+    if (v < ST_PPM_MIN) v = ST_PPM_MIN;
+    if (v > ST_PPM_MAX) v = ST_PPM_MAX;
+    if (v == s_ppm) return;
+    s_ppm = v;
+    sdr_set_freq_correction(s_ppm); /* live: retunes immediately so you can tune by ear/waterfall */
+}
+
 static void scr_off_kick(void) { s_last_touch_ms = pdTICKS_TO_MS(xTaskGetTickCount()); }
 
 static void scr_off_set(bool off)
@@ -1241,14 +1337,17 @@ static int s_menu;
 static char s_log_names[RS41_LOG_MAX][64];
 static int s_log_count, s_log_page, s_log_selected, s_log_lines_page;
 static int s_log_dir_errno;
+static const char *s_log_dir = "RS41"; /* "RS41" or "M20": which /sdcard/<dir> the viewer shows */
 static void rs41_log_refresh(void)
 {
     s_log_count = 0;
     s_log_dir_errno = 0;
-    DIR *d = opendir("/sdcard/RS41");
+    char dpath[24];
+    snprintf(dpath, sizeof dpath, "/sdcard/%s", s_log_dir);
+    DIR *d = opendir(dpath);
     if (!d) {
         s_log_dir_errno = errno;
-        ESP_LOGE("rs41_ui", "Cannot open /sdcard/RS41: errno=%d", errno);
+        ESP_LOGE("rs41_ui", "Cannot open %s: errno=%d", dpath, errno);
         return;
     }
     struct dirent *e;
@@ -1264,7 +1363,7 @@ static void rs41_log_refresh(void)
                  "%.*s", (int)sizeof(s_log_names[0]) - 1, name);
     }
     closedir(d);
-    ESP_LOGI("rs41_ui", "RS41 CSV files found: %d", s_log_count);
+    ESP_LOGI("rs41_ui", "%s CSV files found: %d", s_log_dir, s_log_count);
     for (int i = 1; i < s_log_count; i++) {
         char tmp[64]; strcpy(tmp, s_log_names[i]);
         int j = i;
@@ -1278,7 +1377,11 @@ static void rs41_log_refresh(void)
 static void rs41_log_draw(void)
 {
     rect(0, 0, LW, LH, RGB565(10, 14, 30));
-    text(12, 8, 2, COL_ACCENT, s_menu == 3 ? "RS41 SD LOGS" : "RS41 CSV VIEW");
+    {
+        char ttl[24];
+        snprintf(ttl, sizeof ttl, "%s %s", s_log_dir, s_menu == 3 ? "SD LOGS" : "CSV VIEW");
+        text(12, 8, 2, COL_ACCENT, ttl);
+    }
     rect(534, 4, 96, 31, COL_BTN);
     text(551, 12, 2, COL_TEXT, "BACK");
     if (!rs41_log_ready()) {
@@ -1297,7 +1400,9 @@ static void rs41_log_draw(void)
                 snprintf(eb, sizeof eb, "errno=%d", s_log_dir_errno);
                 text(24, 123, 1, COL_TEXT, eb);
             } else {
-                text(24, 100, 2, COL_TEXT, "NO RS41 CSV FILES YET");
+                char nf[40];
+                snprintf(nf, sizeof nf, "NO %s CSV FILES YET", s_log_dir);
+                text(24, 100, 2, COL_TEXT, nf);
             }
         }
         for (int i = 0; i < RS41_LOG_PAGE; i++) {
@@ -1307,7 +1412,7 @@ static void rs41_log_draw(void)
             rect(14, y, 610, 28, RGB565(28, 45, 67));
             text(25, y+7, 2, COL_TEXT, s_log_names[idx]);
             char path[112]; struct stat st;
-            snprintf(path, sizeof path, "/sdcard/RS41/%s", s_log_names[idx]);
+            snprintf(path, sizeof path, "/sdcard/%s/%s", s_log_dir, s_log_names[idx]);
             if (stat(path, &st) == 0) {
                 char sz[40]; snprintf(sz, sizeof sz, "%lu B", (unsigned long)st.st_size);
                 text(522, y+10, 1, COL_LINE, sz);
@@ -1316,7 +1421,7 @@ static void rs41_log_draw(void)
     } else {
         if (s_log_selected < 0 || s_log_selected >= s_log_count) return;
         text(12, 43, 2, COL_LINE, s_log_names[s_log_selected]);
-        char path[112]; snprintf(path, sizeof path, "/sdcard/RS41/%s", s_log_names[s_log_selected]);
+        char path[112]; snprintf(path, sizeof path, "/sdcard/%s/%s", s_log_dir, s_log_names[s_log_selected]);
         FILE *f = fopen(path, "r");
         if (!f) { text(20, 100, 2, COL_TEXT, "CANNOT OPEN FILE"); return; }
         char line[256]; int row = 0, skip = s_log_lines_page * 10;
@@ -1410,6 +1515,21 @@ static size_t settings_capacity(void)
     default: return sizeof s_st_edit.grid;
     }
 }
+/* Touch keyboard: 5 rows x 10 keys. CASE off = lowercase + digits;
+ * CASE on = uppercase + symbols on the digit row (!"#$%&/()=). Together the two
+ * layers cover all 95 printable ASCII characters (plus SPACE key). */
+#define KB_ROWS 5
+#define KB_COLS 10
+#define KB_X0   12
+#define KB_Y0   88
+#define KB_PX   62
+#define KB_PY   35
+static const char *const KB_NORM[KB_ROWS]  = {"1234567890", "qwertyuiop", "asdfghjkl-", "zxcvbnm.,@", "_?:;+*'<>~"};
+static const char *const KB_SHIFT[KB_ROWS] = {"!\"#$%&/()=", "QWERTYUIOP", "ASDFGHJKL-", "ZXCVBNM.,@", "[]{}\\|^`?:"};
+static char kb_char(int row, int col)
+{
+    return (s_st_lower ? KB_NORM : KB_SHIFT)[row][col];
+}
 static void settings_draw(void)
 {
     rect(0,0,LW,LH,RGB565(10,14,30));
@@ -1417,39 +1537,47 @@ static void settings_draw(void)
         text(12,8,2,COL_ACCENT,"STATION SETTINGS");
         text(12,32,1,COL_TEXT,"TAP FIELD TO EDIT - SAVE WRITES FLASH NVS");
         const char *labels[4] = {"WIFI SSID","WIFI PASSWORD","CALLSIGN","QTH LOCATOR"};
-        const char *values[4] = {s_st_edit.ssid,"********",s_st_edit.callsign,s_st_edit.grid};
+        const char *values[4] = {s_st_edit.ssid,s_st_edit.password,s_st_edit.callsign,s_st_edit.grid};
         for (int i=0;i<4;i++) {
-            int y=58+i*48;
-            rect(12,y,616,42,COL_BTN);
-            text(22,y+6,2,COL_TEXT,labels[i]);
-            text(290,y+6,2,RGB565(130,230,255),values[i]);
+            int y=56+i*40;
+            rect(12,y,616,36,COL_BTN);
+            text(22,y+11,2,COL_TEXT,labels[i]);
+            text(290,y+11,2,RGB565(130,230,255),values[i]);
+        }
+        { /* SDR PPM row: [-10] [-1] value [+1] [+10], applied live, SAVE stores it */
+            int y=56+4*40;
+            rect(12,y,616,36,COL_BTN);
+            text(22,y+11,2,COL_TEXT,"SDR PPM");
+            static const char *bl[4] = {"-10","-1","+1","+10"};
+            static const int bx[4] = {130,198,424,492};
+            for (int i=0;i<4;i++) {
+                rect(bx[i],y+2,64,32,RGB565(40,55,95));
+                text(bx[i]+(64-text_w(bl[i],2))/2,y+11,2,COL_TEXT,bl[i]);
+            }
+            char pv[12]; snprintf(pv,sizeof pv,"%+d",s_ppm);
+            text(266+(154-text_w(pv,2))/2,y+11,2,RGB565(130,230,255),pv);
         }
         rect(12,264,294,44,RGB565(25,100,65));
         text(95,276,2,COL_TEXT,"SAVE");
         rect(334,264,294,44,COL_BTN);
         text(424,276,2,COL_TEXT,"BACK");
         if (s_st_saved) text(14,314,1,RGB565(150,255,160),"SAVED - WIFI RECONNECTING");
+        else if (s_ppm != s_ppm_saved) text(14,314,1,RGB565(255,210,120),"PPM NOT SAVED - PRESS SAVE");
         return;
     }
     const char *labels[4]={"WIFI SSID","WIFI PASSWORD","CALLSIGN","QTH LOCATOR"};
     text(12,6,2,COL_ACCENT,labels[s_st_field]);
     char shown[72];
     const char *v=settings_field();
-    if (s_st_field == 1) {
-        size_t n=strlen(v); if(n>60)n=60;
-        memset(shown,'*',n); shown[n]=0;
-    } else snprintf(shown,sizeof shown,"%s",v);
+    snprintf(shown,sizeof shown,"%s",v); /* password shown in clear text */
     rect(12,36,616,44,COL_BTN);
     text(20,48,2,COL_TEXT,shown);
-    const char *keys[4]={"1234567890","QWERTYUIOP","ASDFGHJKL-","ZXCVBNM._@"};
-    for(int row=0;row<4;row++) for(int col=0;col<10;col++) {
-        char ch=keys[row][col]; if(!ch)continue;
-        int x=12+col*62,y=90+row*43;
-        rect(x,y,58,39,COL_BTN);
+    for(int row=0;row<KB_ROWS;row++) for(int col=0;col<KB_COLS;col++) {
+        char ch=kb_char(row,col); if(!ch)continue;
+        int x=KB_X0+col*KB_PX,y=KB_Y0+row*KB_PY;
+        rect(x,y,58,32,COL_BTN);
         char label[2]={ch,0};
-        /* Keep keyboard labels in the original legible uppercase font.
-           CASE still controls the character inserted into the field. */
-        text(x+19,y+10,2,COL_TEXT,label);
+        text(x+24,y+9,2,COL_TEXT,label);
     }
     const char *special[5]={"CASE","SPACE","DEL","OK","CANCEL"};
     for(int i=0;i<5;i++) {
@@ -1461,23 +1589,36 @@ static void settings_draw(void)
 static bool settings_touch(int x,int y)
 {
     if(s_menu==5) {
-        if(y>=58 && y<250) {int i=(y-58)/48; if(i<4){s_st_field=i;s_st_lower=(i<=1);s_menu=6;}return true;}
+        if(y>=56 && y<256) {
+            int i=(y-56)/40;
+            if(i<4){s_st_field=i;s_st_lower=true;s_menu=6;}
+            else if(i==4) {
+                static const int bx[4]={130,198,424,492};
+                static const int bd[4]={-10,-1,1,10};
+                for(int k=0;k<4;k++) if(x>=bx[k] && x<bx[k]+64) {ppm_adjust(bd[k]);s_st_saved=false;break;}
+            }
+            return true;
+        }
         if(y>=264 && y<310) {
             if(x<318) {
+                s_st_edit.ppm=s_ppm;
                 s_st_saved=station_settings_save(&s_st_edit);
-                if(s_st_saved)wifi_net_apply_settings();
-            } else {s_menu=1;}
+                if(s_st_saved){s_ppm_saved=s_ppm;wifi_net_apply_settings();}
+            } else {
+                if(s_ppm!=s_ppm_saved){s_ppm=s_ppm_saved;sdr_set_freq_correction(s_ppm);} /* BACK without SAVE reverts PPM */
+                s_menu=1;
+            }
             return true;
         }
         return true;
     }
-    if(y>=90 && y<262) {
-        int row=(y-90)/43,col=(x-12)/62;
-        if(x>=12 && col>=0 && col<10 && row<4) {
-            const char *keys[4]={"1234567890","QWERTYUIOP","ASDFGHJKL-","ZXCVBNM._@"};
-            char ch=keys[row][col];
+    if(y>=KB_Y0 && y<KB_Y0+KB_ROWS*KB_PY) {
+        int row=(y-KB_Y0)/KB_PY,col=(x-KB_X0)/KB_PX;
+        if(x>=KB_X0 && col>=0 && col<KB_COLS && row<KB_ROWS) {
+            char ch=kb_char(row,col);
             if(ch) {
-                if(s_st_lower && ch>='A' && ch<='Z')ch+=32;
+                /* callsign / locator are always uppercase */
+                if(s_st_field>=2 && ch>='a' && ch<='z')ch-=32;
                 char *v=settings_field();size_t n=strlen(v);
                 if(n+1<settings_capacity()){v[n]=ch;v[n+1]=0;}
             }
@@ -1501,6 +1642,110 @@ static void menu_close(void)
     rect(0, 0, LW, LH, COL_BG);                 /* the menu drew over the whole screen, header + controls background included */
     rect(0, WF_Y0, LW, WF_H, RGB565(0, 0, 0)); /* panel / waterfall area */
     s_panel_mode = -1;                          /* force the text-panel body to redraw */
+}
+
+/* ---- direct frequency entry (menu 7): tap the frequency in the header ---- */
+#define FE_MAX_CH 10
+static char s_fe_buf[FE_MAX_CH + 1];
+static bool s_fe_khz;          /* unit: false = MHz, true = kHz */
+static const char *s_fe_err;   /* message shown under the entry field, or NULL */
+
+#define FE_X0 12
+#define FE_Y0 100
+#define FE_PX 154
+#define FE_PY 62
+#define FE_W  148
+#define FE_H  56
+/* 4 x 4 grid: digits on the left three columns, actions on the right. */
+static const char *const FE_KEYS[4][4] = {
+    {"7", "8", "9", "DEL"},
+    {"4", "5", "6", "CLR"},
+    {"1", "2", "3", "CANCEL"},
+    {".", "0", "MHZ", "ENT"},
+};
+
+static void fe_open(void)
+{
+    s_fe_buf[0] = 0;
+    s_fe_khz = false; /* every entry starts in MHz */
+    s_fe_err = NULL;
+    s_menu = 7;
+}
+
+static void fe_draw(void)
+{
+    rect(0, 0, LW, LH, RGB565(10, 14, 30));
+    text(12, 8, 2, COL_ACCENT, "ENTER FREQUENCY");
+    char cur[40];
+    snprintf(cur, sizeof cur, "CURRENT %.4f MHZ", s_center / 1e6);
+    text(12, 28, 1, COL_LINE, cur);
+
+    rect(12, 44, 616, 48, COL_BTN);
+    char shown[24];
+    snprintf(shown, sizeof shown, "%s_", s_fe_buf);
+    text(22, 56, 3, COL_TEXT, shown);
+    const char *unit = s_fe_khz ? "KHZ" : "MHZ";
+    text(628 - 10 - text_w(unit, 3), 56, 3, RGB565(130, 230, 255), unit);
+    if (s_fe_err) text(300, 30, 1, RGB565(255, 160, 120), s_fe_err);
+
+    for (int r = 0; r < 4; r++) for (int c = 0; c < 4; c++) {
+        const char *lab = FE_KEYS[r][c];
+        int x = FE_X0 + c * FE_PX, y = FE_Y0 + r * FE_PY;
+        uint16_t fill = COL_BTN;
+        if (!strcmp(lab, "ENT")) fill = RGB565(25, 110, 65);
+        else if (!strcmp(lab, "MHZ")) { lab = s_fe_khz ? "KHZ" : "MHZ"; fill = RGB565(70, 70, 110); }
+        rect(x, y, FE_W, FE_H, fill);
+        rect(x, y, FE_W, 2, COL_BTN_HI);
+        int sc = (strlen(lab) > 1) ? 2 : 3;
+        text(x + (FE_W - text_w(lab, sc)) / 2, y + FE_H / 2 - 4 * sc, sc, COL_TEXT, lab);
+    }
+}
+
+/* Parse the entry and tune. Returns true if the frequency was accepted. */
+static bool fe_apply(void)
+{
+    if (!s_fe_buf[0]) { s_fe_err = "ENTER A FREQUENCY"; return false; }
+    char *end = NULL;
+    double v = strtod(s_fe_buf, &end);
+    if (end == s_fe_buf || *end) { s_fe_err = "INVALID NUMBER"; return false; }
+    double hz = v * (s_fe_khz ? 1e3 : 1e6);
+    if (hz < (double)FREQ_MIN || hz > (double)FREQ_MAX) {
+        s_fe_err = "OUT OF RANGE 0.5-1766 MHZ";
+        return false;
+    }
+    rs_scan_stop(); /* a running RS41 scan would immediately retune away again */
+    retune((int64_t)llround(hz));
+    s_label = "KEYED";
+    return true;
+}
+
+static bool fe_touch(int x, int y)
+{
+    if (x < FE_X0 || y < FE_Y0) return true;
+    int c = (x - FE_X0) / FE_PX, r = (y - FE_Y0) / FE_PY;
+    if (c < 0 || c > 3 || r < 0 || r > 3) return true;
+    /* ignore the gaps between keys */
+    if ((x - FE_X0) % FE_PX >= FE_W || (y - FE_Y0) % FE_PY >= FE_H) return true;
+    const char *k = FE_KEYS[r][c];
+    size_t n = strlen(s_fe_buf);
+    s_fe_err = NULL;
+    if (!strcmp(k, "ENT")) {
+        if (fe_apply()) { s_ui_force_spectrum = true; menu_close(); }
+    } else if (!strcmp(k, "CANCEL")) {
+        menu_close();
+    } else if (!strcmp(k, "DEL")) {
+        if (n) s_fe_buf[n - 1] = 0;
+    } else if (!strcmp(k, "CLR")) {
+        s_fe_buf[0] = 0;
+    } else if (!strcmp(k, "MHZ")) {
+        s_fe_khz = !s_fe_khz;
+    } else if (k[0] == '.') {
+        if (!strchr(s_fe_buf, '.') && n + 1 <= FE_MAX_CH) { s_fe_buf[n] = '.'; s_fe_buf[n + 1] = 0; }
+    } else if (n + 1 <= FE_MAX_CH) {
+        s_fe_buf[n] = k[0];
+        s_fe_buf[n + 1] = 0;
+    }
+    return true;
 }
 
 static void menu_status(char *b, size_t n)
@@ -1569,6 +1814,7 @@ static void draw_menu(void)
         return;
     }
     if (s_menu == 5 || s_menu == 6) { settings_draw(); return; }
+    if (s_menu == 7) { fe_draw(); return; }
     /* USER-plan editor */
     text(6, 4, 2, COL_ACCENT, "EDIT USER PLAN");
     text(6, 26, 1, COL_TEXT, "TAP HOUR MODE OR BAND TO CHANGE    X = DELETE");
@@ -1597,6 +1843,7 @@ static void draw_menu(void)
 static bool menu_touch(int x, int y)
 {
     if (s_menu == 5 || s_menu == 6) return settings_touch(x,y);
+    if (s_menu == 7) return fe_touch(x, y);
     if (s_menu == 3 || s_menu == 4) return rs41_log_touch(x, y);
     if (s_menu == 1) {
         for (int i = 0; i < M1_ROWS; i++) {
@@ -1759,11 +2006,21 @@ static bool handle_touch(void)
         return changed;
     }
 
+    /* Tap on the frequency read-out in the header: direct frequency entry. */
+    if (edge && !lora_aprs_enabled() && ly < SPEC_Y0 - 1 && lx >= 190 && lx < 450) {
+        dragging = false;
+        tap_moved = false;
+        fe_open();
+        prev = pressed;
+        return true;
+    }
+
     /* LOG is inside the waterfall area: handle its tap before drag tuning. */
-    if (edge && s_mode == DSP_MODE_RS41 && !lora_aprs_enabled() &&
+    if (edge && is_sonde_mode(s_mode) && !lora_aprs_enabled() &&
         lx >= 540 && lx < 632 && ly >= WF_Y0 + 3 && ly < WF_Y0 + 26) {
         dragging = false;
         tap_moved = false;
+        s_log_dir = (s_mode == DSP_MODE_M20) ? "M20" : "RS41";
         s_log_page = 0;
         rs41_log_refresh();
         s_menu = 3;
@@ -1786,7 +2043,8 @@ static bool handle_touch(void)
         }
     } else if (edge) {
         dragging = false;
-        if (s_mode == DSP_MODE_RS41 && lx >= 540 && ly >= WF_Y0 + 3 && ly < WF_Y0 + 29) {
+        if (is_sonde_mode(s_mode) && lx >= 540 && ly >= WF_Y0 + 3 && ly < WF_Y0 + 29) {
+            s_log_dir = (s_mode == DSP_MODE_M20) ? "M20" : "RS41";
             s_log_page = 0; rs41_log_refresh(); s_menu = 3; changed = true;
         } else if (lora_aprs_enabled() && !hit(&B_LORA, lx, ly)) { /* LoRa owns the receiver. */ }
         else if (hit(&B_TDN, lx, ly)) { retune((int64_t)s_center - STEPS[s_step_i]); changed = true; }
@@ -1798,6 +2056,10 @@ static bool handle_touch(void)
             changed = true;
         } else if (hit(&B_RS41, lx, ly)) {
             /* RS41 is handled on release or after a 1.5s hold above. */
+        } else if (hit(&B_M20, lx, ly)) {
+            if (s_mode == DSP_MODE_M20) { snap_to_peak(); s_label = "SNAP"; }
+            else mode_button(DSP_MODE_M20);
+            changed = true;
         } else if (ly >= MODE_BTN_Y && ly < MODE_BTN_Y + MODE_BTN_H) {
             for (int i = 0; i < N_MODE_ROW; i++) {
                 box_t b = { MODE_BTN_X(i), MODE_BTN_Y, MODE_BTN_W, MODE_BTN_H };
@@ -2020,6 +2282,8 @@ void ui_start(void)
         ESP_LOGW(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs_err));
 
     scr_off_load();
+    ppm_load();
+    if (s_ppm) sdr_set_freq_correction(s_ppm);
     bandplan_init();
     bandplan_set_apply_cb(plan_apply);
 

@@ -33,12 +33,12 @@ static const bookmark_t BM_HF[] = {
 
 /* VHF: start at 144.000 MHz, narrowband FM. */
 static const bookmark_t BM_VHF[] = {
-    {"VHF 144 MHZ", 144000000, DSP_MODE_NFM, 1152000, 12500},
+    {"VHF 144 MHZ", 145687500, DSP_MODE_NFM, 1152000, 12500},
 };
 
 /* UHF: start at 430.000 MHz, narrowband FM. */
 static const bookmark_t BM_UHF[] = {
-    {"UHF 430 MHZ", 430000000, DSP_MODE_NFM, 1152000, 12500},
+    {"UHF 430 MHZ", 434300000, DSP_MODE_NFM, 1152000, 12500},
 };
 
 #define BM_HF_N  (int)(sizeof(BM_HF) / sizeof(BM_HF[0]))

@@ -46,6 +46,7 @@ void sdr_set_iq_discard(bool discard)
 
 static volatile uint64_t s_produced;
 static volatile uint64_t s_dropped;
+static int s_ppm;
 static uint32_t s_sample_rate;
 static uint32_t s_center_freq;
 static const char *s_tuner = "unknown";
@@ -133,6 +134,7 @@ bool sdr_stream_start(uint32_t center_freq, uint32_t sample_rate)
 
     if (rtlsdr_set_sample_rate(s_dev, sample_rate) < 0)
         ESP_LOGW(TAG, "set_sample_rate failed");
+    if (s_ppm) sdr_set_freq_correction(s_ppm); /* before tuning so the first tune is correct */
     if (rtlsdr_set_center_freq(s_dev, center_freq) < 0)
         ESP_LOGW(TAG, "set_center_freq failed");
     rtlsdr_set_tuner_gain_mode(s_dev, 0); /* automatic gain */
@@ -171,6 +173,19 @@ bool sdr_set_sample_rate(uint32_t hz)
     ESP_LOGI(TAG, "sample rate -> %" PRIu32 " Hz", hz);
     return true;
 }
+
+int sdr_set_freq_correction(int ppm)
+{
+    s_ppm = ppm; /* remembered even before the device is open */
+    if (!s_dev) return 0;
+    int r = rtlsdr_set_freq_correction(s_dev, ppm);
+    if (r == -2) r = 0; /* librtlsdr: -2 = value already set */
+    if (r < 0) ESP_LOGW(TAG, "set_freq_correction(%d) failed: %d", ppm, r);
+    else ESP_LOGI(TAG, "freq correction -> %d ppm", ppm);
+    return r;
+}
+
+int sdr_get_freq_correction(void) { return s_ppm; }
 
 int sdr_set_gain(int tenth_db)
 {

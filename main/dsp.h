@@ -29,6 +29,7 @@ enum {
     DSP_MODE_WSPR = 8, /* WSPR beacon mode: USB audio → wspr.c                  */
     DSP_MODE_HORUS = 9, /* RTL-SDR 4FSK front-end; packet decoding pending */
     DSP_MODE_APRS = 10, /* 1200-baud Bell 202 AX.25 via RTL-SDR */
+    DSP_MODE_M20 = 11,  /* Meteomodem M20 radiosonde, 9600 baud, 96 kHz IF (see m20.h) */
     DSP_MODE_COUNT
 };
 

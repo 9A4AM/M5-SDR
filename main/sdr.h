@@ -43,6 +43,12 @@ int sdr_set_center_freq(uint32_t freq);
  * hardware (HF uses 288 kHz, which dsp.c decimates to 96 kHz). */
 bool sdr_set_sample_rate(uint32_t hz);
 
+/* Crystal frequency correction in ppm (positive = dongle runs high). Retunes the
+ * current centre frequency so it takes effect immediately; safe while streaming.
+ * Returns 0 on success (also when the value is unchanged), <0 on error. */
+int sdr_set_freq_correction(int ppm);
+int sdr_get_freq_correction(void);
+
 /* Tuner gain: tenth_db < 0 = automatic (AGC), otherwise manual gain in 0.1 dB
  * (e.g. 280 = 28.0 dB; the nearest supported step is used). */
 int sdr_set_gain(int tenth_db);
