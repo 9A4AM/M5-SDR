@@ -10,19 +10,25 @@
 #define NET_CFG_H
 
 /* ---- WiFi (station) ------------------------------------------------------ */
-#define NET_WIFI_SSID     "WIFI-SSID"
-#define NET_WIFI_PASSWORD "WIFI-PASS"
+#define NET_WIFI_SSID     "SSID"
+#define NET_WIFI_PASSWORD "passw"
 
 /* Timezone for the band-plan scheduler (POSIX TZ string; SNTP syncs UTC and
  * this converts it to local time for the schedule). Central European Time
  * with DST is the default — change to your zone, e.g. "UTC0", "EST5EDT", … */
 #define NET_TZ            "CET-1CEST,M3.5.0,M10.5.0/3"
 
+/* ---- RTL-SDR frequency correction ---------------------------------------- */
+/* Crystal error of your RTL-SDR in ppm (positive = dongle runs high). This is
+ * only the compile-time default: once you SAVE a value in the UI
+ * (PLAN -> SETTINGS -> SDR PPM) the NVS value takes precedence. */
+#define SDR_PPM_DEFAULT   0
+
 /* ---- PSK Reporter identity ------------------------------------------------ */
 /* Your callsign as the receiving station (uploaded with every report). */
-#define PSK_CALLSIGN      "CALLSIGN"
+#define PSK_CALLSIGN      "CALL"
 /* Your locator, 4 or 6 characters (e.g. "JN76", "FN42AB"). */
-#define PSK_GRID          "QTHLOC"
+#define PSK_GRID          "JN85XX"
 /* Software descriptor shown on pskreporter.info. */
 #define PSK_SW_NAME       "M5-SDR v1.3"
 /* Receiver rig description (optional rigInformation field, 30351.13). */
