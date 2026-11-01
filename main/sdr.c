@@ -47,8 +47,10 @@ void sdr_set_iq_discard(bool discard)
 static volatile uint64_t s_produced;
 static volatile uint64_t s_dropped;
 static int s_ppm;
-static uint32_t s_sample_rate;
-static uint32_t s_center_freq;
+static int s_gain_tenth = -1;            /* -1 = automatic; remembered until the dongle is opened */
+static bool s_cfg_touched;               /* a setter ran before the dongle was open */
+static uint32_t s_sample_rate = SDR_DEFAULT_SAMPLE_RATE;
+static uint32_t s_center_freq = SDR_DEFAULT_CENTER_FREQ;
 static const char *s_tuner = "unknown";
 static volatile bool s_stream_running;
 static volatile bool s_stop_requested;
@@ -65,6 +67,8 @@ static const char *tuner_name(enum rtlsdr_tuner t)
     default:                  return "unknown";
     }
 }
+
+bool sdr_is_open(void) { return s_dev != NULL; }
 
 bool sdr_open(void)
 {
@@ -123,6 +127,10 @@ bool sdr_stream_start(uint32_t center_freq, uint32_t sample_rate)
         ESP_LOGE(TAG, "sdr_stream_start before sdr_open");
         return false;
     }
+    if (s_cfg_touched) { /* the user tuned / changed rate while no dongle was attached */
+        center_freq = s_center_freq;
+        sample_rate = s_sample_rate;
+    }
 
     s_ring = heap_caps_malloc(RING_SIZE, MALLOC_CAP_SPIRAM);
     if (!s_ring) {
@@ -137,7 +145,7 @@ bool sdr_stream_start(uint32_t center_freq, uint32_t sample_rate)
     if (s_ppm) sdr_set_freq_correction(s_ppm); /* before tuning so the first tune is correct */
     if (rtlsdr_set_center_freq(s_dev, center_freq) < 0)
         ESP_LOGW(TAG, "set_center_freq failed");
-    rtlsdr_set_tuner_gain_mode(s_dev, 0); /* automatic gain */
+    sdr_set_gain(s_gain_tenth); /* automatic unless the user picked a manual gain before */
     if (rtlsdr_reset_buffer(s_dev) < 0)   /* mandatory before reading */
         ESP_LOGW(TAG, "reset_buffer failed");
 
@@ -156,7 +164,7 @@ bool sdr_stream_start(uint32_t center_freq, uint32_t sample_rate)
 
 int sdr_set_center_freq(uint32_t freq)
 {
-    if (!s_dev) return -1;
+    if (!s_dev) { s_center_freq = freq; s_cfg_touched = true; return 0; } /* applied at stream start */
     int r = rtlsdr_set_center_freq(s_dev, freq);
     if (r >= 0) s_center_freq = freq;
     return r;
@@ -164,7 +172,7 @@ int sdr_set_center_freq(uint32_t freq)
 
 bool sdr_set_sample_rate(uint32_t hz)
 {
-    if (!s_dev) return false;
+    if (!s_dev) { s_sample_rate = hz; s_cfg_touched = true; return true; } /* applied at stream start */
     if (rtlsdr_set_sample_rate(s_dev, hz) < 0) {
         ESP_LOGW(TAG, "set_sample_rate(%" PRIu32 ") failed", hz);
         return false;
@@ -189,7 +197,8 @@ int sdr_get_freq_correction(void) { return s_ppm; }
 
 int sdr_set_gain(int tenth_db)
 {
-    if (!s_dev) return -1;
+    s_gain_tenth = tenth_db; /* remembered for when the dongle appears */
+    if (!s_dev) return 0;
     if (tenth_db < 0) return rtlsdr_set_tuner_gain_mode(s_dev, 0); /* automatic */
     int r = rtlsdr_set_tuner_gain_mode(s_dev, 1);
     if (r < 0) return r;

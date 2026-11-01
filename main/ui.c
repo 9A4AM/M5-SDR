@@ -25,7 +25,9 @@
 #include "rs41_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_heap_caps.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -127,7 +129,7 @@ static void cpu_temp_sample(void)
 /* Startup splash: full-screen welcome banner shown for a few seconds after
  * boot. Edit the callsign/text to your own. */
 #define SPLASH_TITLE "M5-SDR"
-#define SPLASH_CALL  "9A4AM"
+#define SPLASH_CALL  "9A3ZI -> Modified by 9A4AM"
 #define SPLASH_MS    2500
 
 static uint16_t *LBUF;
@@ -390,6 +392,25 @@ static void rs_scan_stop(void)
     s_rs_scan = RS_SCAN_OFF;
     if (s_mode == DSP_MODE_RS41) s_label = "RS41 MANUAL";
 }
+/* Current IP address (first netif that has one), refreshed every 2 s. */
+static char s_ip_str[24] = "IP -";
+static void ip_refresh(void)
+{
+    static TickType_t last;
+    TickType_t now = xTaskGetTickCount();
+    if (last && now - last < pdMS_TO_TICKS(2000)) return;
+    last = now;
+    char found[16] = "";
+    for (esp_netif_t *n = esp_netif_next_unsafe(NULL); n; n = esp_netif_next_unsafe(n)) {
+        esp_netif_ip_info_t ip;
+        if (esp_netif_get_ip_info(n, &ip) == ESP_OK && ip.ip.addr) {
+            snprintf(found, sizeof found, IPSTR, IP2STR(&ip.ip));
+            break;
+        }
+    }
+    snprintf(s_ip_str, sizeof s_ip_str, "IP %s", found[0] ? found : "-");
+}
+
 static void draw_header(void)
 {
     rect(0, 0, LW, SPEC_Y0 - 1, COL_BG);
@@ -416,8 +437,13 @@ static void draw_header(void)
     else
         snprintf(span_label, sizeof span_label, "SPAN %luK", (unsigned long)(visible / 1000));
     text(100, 7, 1, COL_TEXT, span_label);
-    text(6, 24, 1, s_rs_scan == RS_SCAN_LOCKED ? COL_LINE : COL_TEXT,
-         s_rs_scan == RS_SCAN_OFF ? s_label : rs_scan_status());
+    if (!sdr_is_open())
+        text(6, 24, 1, RGB565(255, 120, 90), "NO RTL-SDR - PLUG IN THE DONGLE");
+    else
+        text(6, 24, 1, s_rs_scan == RS_SCAN_LOCKED ? COL_LINE : COL_TEXT,
+             s_rs_scan == RS_SCAN_OFF ? s_label : rs_scan_status());
+    ip_refresh();
+    text(6, 33, 1, COL_LINE, s_ip_str); /* IP address under the label, top-left */
 
     /* S-meter top-right, -60..+60 relative scale */
     int mx = 470, my = 6, mw = 160, mh = 11;
@@ -810,12 +836,12 @@ static void draw_spectrum(const float *spec, int bins)
 
 typedef struct { int x, y, w, h; } box_t;
 static const box_t B_TDN  = {  6, 220, 52, 44};  /* tune down one step */
-static const box_t B_STEP = { 62, 220, 64, 44};  /* cycle step size    */
-static const box_t B_TUP  = {130, 220, 52, 44};  /* tune up one step   */
-static const box_t B_RS41 = {186, 220, 64, 44};  /* RS41 mode; pressed again in RS41 mode = centre on the strongest peak */
-static const box_t B_M20  = {254, 220, 56, 44};  /* M20 mode; pressed again in M20 mode = centre on the strongest peak */
-static const box_t B_GAIN = {314, 220, 44, 44};  /* tuner gain: AGC / manual steps */
-static const box_t B_PLAN = {362, 220, 88, 44};  /* band-plan menu: time-scheduled FT8/WSPR band hopping */
+static const box_t B_STEP = { 62, 220, 72, 44};  /* cycle step size (wide enough for "12.5k") */
+static const box_t B_TUP  = {138, 220, 52, 44};  /* tune up one step   */
+static const box_t B_RS41 = {194, 220, 64, 44};  /* RS41 mode; pressed again in RS41 mode = centre on the strongest peak */
+static const box_t B_M20  = {262, 220, 56, 44};  /* M20 mode; pressed again in M20 mode = centre on the strongest peak */
+static const box_t B_GAIN = {322, 220, 44, 44};  /* tuner gain: AGC / manual steps */
+static const box_t B_PLAN = {370, 220, 80, 44};  /* band-plan menu: time-scheduled FT8/WSPR band hopping */
 static const box_t B_HF   = {  6, 272, 64, 44};
 static const box_t B_VHF  = { 74, 272, 64, 44};
 static const box_t B_UHF  = {142, 272, 64, 44};
@@ -1893,6 +1919,41 @@ static bool menu_touch(int x, int y)
     return true;
 }
 
+/* ---- remote (web) touch injection ------------------------------------------- */
+static volatile bool s_wt_down;
+static volatile int s_wt_x, s_wt_y;
+static volatile uint32_t s_wt_ms;      /* time of the last web touch event */
+static volatile uint32_t s_wt_down_ms; /* time the press started */
+
+void ui_web_touch(int x, int y, bool down)
+{
+    if (x < 0) x = 0;
+    if (x >= LW) x = LW - 1;
+    if (y < 0) y = 0;
+    if (y >= LH) y = LH - 1;
+    uint32_t now = pdTICKS_TO_MS(xTaskGetTickCount());
+    if (down && !s_wt_down) s_wt_down_ms = now;
+    s_wt_x = x;
+    s_wt_y = y;
+    s_wt_ms = now;
+    s_wt_down = down;
+}
+
+/* True while a web touch should act as a finger on the panel. A very short click is
+ * stretched to ~60 ms so it survives the 2-poll debounce; a client that vanishes
+ * with the pointer down is released after 2 s. */
+static bool web_touch_active(int *x, int *y)
+{
+    if (s_menu == 5 || s_menu == 6) return false; /* never drive the password screens blind */
+    uint32_t now = pdTICKS_TO_MS(xTaskGetTickCount());
+    bool act = s_wt_down ? (now - s_wt_ms < 2000u)
+                         : (s_wt_down_ms && now - s_wt_down_ms < 60u && s_wt_ms >= s_wt_down_ms);
+    if (!act) return false;
+    *x = s_wt_x;
+    *y = s_wt_y;
+    return true;
+}
+
 static bool handle_touch(void)
 {
     static bool prev = false, dragging = false;
@@ -1910,6 +1971,16 @@ static bool handle_touch(void)
 
     esp_lcd_touch_point_data_t p[2];
     int n = bsp_tab5_touch_read(p, 2);
+    bool from_web = false;
+    {   /* a browser pointer acts as a finger when the panel is not touched */
+        int wx, wy;
+        if (n == 0 && web_touch_active(&wx, &wy)) {
+            from_web = true;
+            p[0].x = wy * SCALE + SCALE / 2;
+            p[0].y = PANEL_H - wx * SCALE - SCALE / 2;
+            n = 1;
+        }
+    }
 
     /* ~1.2 s startup grace: the touch controller reports stray points right after
      * init that would otherwise "tap" a control. */
@@ -1921,12 +1992,12 @@ static bool handle_touch(void)
     bool pressed = run >= 2;
     bool two = pressed && n >= 2;
 
-    if (s_scr_off) { /* screensaver: the touch only wakes the display */
+    if (s_scr_off && !from_web) { /* screensaver: the touch only wakes the display (web touches just act) */
         if (pressed) { scr_off_set(false); scr_off_kick(); }
         prev = pressed;
         return false;
     }
-    if (pressed) scr_off_kick();
+    if (pressed && !from_web) scr_off_kick(); /* remote use does not hold the panel on */
 
     int lx = 0, ly = 0;
     if (pressed) {
@@ -2156,8 +2227,48 @@ static bool handle_touch(void)
 
 /* ---- present ------------------------------------------------------------- */
 
+/* ---- web mirror snapshot ---------------------------------------------------- */
+static uint16_t *s_web_snap;
+static SemaphoreHandle_t s_web_mtx;
+static volatile uint32_t s_web_seq;     /* 0 = no frame captured yet */
+static volatile uint32_t s_web_req_ms;  /* last time a web client asked for a frame */
+
+bool ui_web_lock_frame(const uint16_t **fb)
+{
+    if (!s_web_snap || !s_web_mtx) return false;
+    s_web_req_ms = pdTICKS_TO_MS(xTaskGetTickCount()); /* tells present() somebody is watching */
+    for (int i = 0; i < 40; i++) { /* first request: wait for the next rendered frame */
+        if (s_web_seq) break;
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
+    if (!s_web_seq) return false;
+    if (xSemaphoreTake(s_web_mtx, pdMS_TO_TICKS(500)) != pdTRUE) return false;
+    *fb = s_web_snap;
+    return true;
+}
+
+void ui_web_unlock_frame(void) { if (s_web_mtx) xSemaphoreGive(s_web_mtx); }
+
+static void web_capture(void)
+{
+    if (!s_web_snap || s_menu == 5 || s_menu == 6) return; /* never mirror the settings/password screens */
+    if (pdTICKS_TO_MS(xTaskGetTickCount()) - s_web_req_ms > 3000) return; /* nobody watching: no cost */
+    if (xSemaphoreTake(s_web_mtx, 0) != pdTRUE) return;     /* being read: skip this frame */
+    memcpy(s_web_snap, LBUF, (size_t)LW * LH * 2);
+    s_web_seq++;
+    xSemaphoreGive(s_web_mtx);
+}
+
+/* A browser is polling frames: keep rendering even while the panel is dark. */
+static bool web_watching(void)
+{
+    return pdTICKS_TO_MS(xTaskGetTickCount()) - s_web_req_ms <= 3000;
+}
+
 static void present(void)
 {
+    web_capture();
+    if (s_scr_off) return; /* screensaver: the web mirror gets the frame, the dark panel does not */
     ppa_do_scale_rotate_mirror(s_ppa, &(ppa_srm_oper_config_t){
         .in = { .buffer = LBUF, .pic_w = LW, .pic_h = LH, .block_w = LW, .block_h = LH,
                 .srm_cm = PPA_SRM_COLOR_MODE_RGB565 },
@@ -2206,7 +2317,7 @@ static void ui_task(void *arg)
         if (!s_scr_off && SCR_OFF_MS[s_scr_off_i] &&
             pdTICKS_TO_MS(xTaskGetTickCount()) - s_last_touch_ms >= SCR_OFF_MS[s_scr_off_i])
             scr_off_set(true);
-        if (s_scr_off) { vTaskDelay(pdMS_TO_TICKS(50)); continue; } /* dark: nothing to render */
+        if (s_scr_off && !web_watching()) { vTaskDelay(pdMS_TO_TICKS(50)); continue; } /* dark and nobody on the web: nothing to render */
         if (s_menu) { /* an open menu owns the screen; the SDR keeps running underneath */
             if (dirty) { if (s_menu == 3 || s_menu == 4) rs41_log_draw(); else draw_menu(); present(); }
             vTaskDelay(pdMS_TO_TICKS(30));
@@ -2263,6 +2374,8 @@ static void ui_task(void *arg)
 void ui_start(void)
 {
     LBUF = heap_caps_malloc((size_t)LW * LH * 2, MALLOC_CAP_SPIRAM);
+    s_web_snap = heap_caps_malloc((size_t)LW * LH * 2, MALLOC_CAP_SPIRAM);
+    s_web_mtx = xSemaphoreCreateMutex();
     if (!LBUF) { ESP_LOGE(TAG, "no PSRAM for landscape buffer"); return; }
     ESP_ERROR_CHECK(ppa_register_client(&(ppa_client_config_t){ .oper_type = PPA_OPERATION_SRM }, &s_ppa));
 

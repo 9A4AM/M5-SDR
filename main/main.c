@@ -27,6 +27,7 @@
 #include "psk.h"
 #include "lora_aprs.h"
 #include "rs41_log.h"
+#include "web_ui.h"
 
 static const char *TAG = "tab5-sdr";
 
@@ -36,8 +37,6 @@ static const char *TAG = "tab5-sdr";
 
 #define RGB565(r, g, b) \
     ((uint16_t)(((((r) >> 3) & 0x1F) << 11) | ((((g) >> 2) & 0x3F) << 5) | (((b) >> 3) & 0x1F)))
-
-static uint16_t *fb(void) { return (uint16_t *)bsp_tab5_display_get_frame_buffer(0); }
 
 static void draw_test_pattern(void)
 {
@@ -70,14 +69,6 @@ static void draw_test_pattern(void)
     ESP_LOGI(TAG, "LCD test pattern sent");
 }
 
-static void fill_screen(uint16_t color)
-{
-    uint16_t *f = fb();
-    if (!f) return;
-    for (size_t i = 0; i < (size_t)PANEL_W * PANEL_H; i++) f[i] = color;
-    bsp_tab5_display_flush(0);
-}
-
 void app_main(void)
 {
     ESP_LOGI(TAG, "Tab5-SDR boot — free heap %" PRIu32 ", PSRAM %u",
@@ -94,31 +85,30 @@ void app_main(void)
 
     rs41_log_start(); /* Optional SD; failure does not stop SDR reception. */
 
-    /* USB-A 5V VBUS is off by default — power the dongle, then enumerate. */
+    /* USB-A 5V VBUS is off by default — power the port for the dongle. */
     bsp_tab5_set_usb_host_power(true);
     vTaskDelay(pdMS_TO_TICKS(300));
 
-    fill_screen(RGB565(0, 0, 200)); /* blue: searching */
-    sdr_open();                     /* blocks until a dongle is opened */
-    fill_screen(RGB565(0, 120, 0)); /* green: opened */
-
-    if (!sdr_stream_start(SDR_DEFAULT_CENTER_FREQ, SDR_DEFAULT_SAMPLE_RATE)) {
-        fill_screen(RGB565(220, 0, 0)); /* red: stream failed */
-        return;
-    }
-
-    /* Speaker up, then demod + landscape UI take over the screen. */
+    /* Everything that does not need the dongle starts first, so the UI, WiFi and
+     * the web mirror are available even when no RTL-SDR is plugged in. Until the
+     * dongle is opened, the SDR layer just remembers frequency, rate and gain. */
     audio_init();
-    dsp_start();
-    ft8_start(); /* FT8 decoder task (idle until FT8 mode feeds it audio) */
+    dsp_start();  /* idles while the IQ ring is empty */
+    ft8_start();  /* FT8 decoder task (idle until FT8 mode feeds it audio) */
     wspr_start(); /* WSPR decoder task (likewise) */
     lora_aprs_init();
     ui_start();
 
-    /* WiFi (P4 ← C6 via esp_hosted) + SNTP, then the PSK Reporter uploader.
-     * Non-fatal without a network: the receiver works offline. */
+    /* WiFi (P4 <- C6 via esp_hosted) + SNTP, then the PSK Reporter uploader and the
+     * web mirror. Non-fatal without a network: the receiver works offline. */
     wifi_net_init();
     psk_init();
+    web_ui_start(); /* browser mirror of the screen: http://<tab5-ip>/ */
+
+    /* Wait for the dongle (blocks only this task; everything above keeps running). */
+    sdr_open();
+    if (!sdr_stream_start(SDR_DEFAULT_CENTER_FREQ, SDR_DEFAULT_SAMPLE_RATE))
+        ESP_LOGE(TAG, "RTL-SDR stream failed to start");
 
     /* Heartbeat: confirm the stream stays drop-free under the DSP load. */
     while (1) {

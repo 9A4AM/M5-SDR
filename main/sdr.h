@@ -31,6 +31,11 @@ typedef struct {
  * Returns true once opened. */
 bool sdr_open(void);
 
+/* True once a dongle has been opened. Until then the setters below (centre
+ * frequency, sample rate, gain, ppm) only remember the value and
+ * sdr_stream_start() applies it, so the UI can be used with no dongle plugged in. */
+bool sdr_is_open(void);
+
 /* Configure rate/freq/gain and start the async IQ stream on its own task.
  * Must be called after sdr_open(). Returns true on success. */
 bool sdr_stream_start(uint32_t center_freq, uint32_t sample_rate);
